@@ -20,7 +20,11 @@
 
 #define MAX_UDP_SOCKET_OPEN     10
 
-#define log_out printf
+#define log_out(s...) do {                           			\
+	fprintf(stdout, s);                                         \
+	fprintf(stdout, "\n");                                      \
+	fflush(stdout);                                             \
+} while (0)
 
 enum ROLE {
     ROLE_Client,

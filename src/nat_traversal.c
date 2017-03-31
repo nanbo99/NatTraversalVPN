@@ -44,6 +44,7 @@ struct TraversalMsg {
     uint32_t cmd;
     uint32_t port;
     char ip[MAX_IP_SIZE];
+    char padding[4];
 };
 
 struct socket_data {
@@ -284,6 +285,8 @@ int register_socket(enum ROLE role, int sockfd, int listen_port) {
     struct socket_data *sd;
     struct sockaddr_in remote_sockaddr, server_sockaddr;
     
+    log_out("%s: enter, role: %d\n", __FUNCTION__, role);
+    
     memset(&remote_sockaddr, 0, sizeof(remote_sockaddr));
 	remote_sockaddr.sin_family = AF_INET;
 	remote_sockaddr.sin_port = htons(LISTEN_PORT0);
@@ -291,13 +294,15 @@ int register_socket(enum ROLE role, int sockfd, int listen_port) {
 	
     if(role == ROLE_Client) {
     	struct TraversalMsg msg, reply;
-    	// get all lock.
-		pthread_mutex_lock(&sd->rlock);
-		pthread_mutex_lock(&sd->wlock);
+		struct timeval tv;
+		tv.tv_sec = 2;
+		tv.tv_usec = 0;
+		setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (char*)&tv, sizeof(struct timeval));
 		
-		log_out("Get Server Infomation!\n");
+		log_out("Get Server Infomation from (%s:%d)!\n", PROXY_SERVER_IP, LISTEN_PORT0);
 		msg.role = ROLE_Client;
 		msg.cmd = TRAVERSAL_GETSERVER;
+		msg.port = listen_port;
 		if(sendmessage(sockfd, &remote_sockaddr, &msg) < 0 || 
 			recvmessage(sockfd, &remote_sockaddr, &reply) < 0) {
 			log_out("Error when get server addr!\n");
@@ -322,9 +327,10 @@ int register_socket(enum ROLE role, int sockfd, int listen_port) {
 			nat_traversal(app_role, sockfd, &server_sockaddr, 10);
 			log_out("done!\n");
 		}
-		// release all lock.
-		pthread_mutex_unlock(&sd->rlock);
-		pthread_mutex_unlock(&sd->wlock);
+		
+		tv.tv_sec = 2;
+		tv.tv_usec = 0;
+		setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (char*)&tv, sizeof(struct timeval));
     } else if(role == ROLE_Server) {
     	// For Server, nat_type must get first, NAT_None don't need nat traverse.
 		assert(nat_type >= 0 && nat_type < NAT_TYPE_MAX);
@@ -364,6 +370,9 @@ int nat_traversal_init(enum ROLE role) {
 	int ret;
 	nat_type = request_nat_type(PROXY_SERVER_IP, LISTEN_PORT0, LISTEN_PORT1);
 	app_role = role;
+	
+	log_out("%s: %s's Nat type is: %s\n", __FUNCTION__, 
+			role == ROLE_Server ? "Server" : "Client", nat_type2str(nat_type));
 	
 	if(nat_type < 0 || nat_type >= NAT_TYPE_MAX) return -1;
 	

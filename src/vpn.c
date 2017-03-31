@@ -321,6 +321,44 @@ int vpn_udp_alloc(int if_bind, const char *host, int port,
   freeaddrinfo(res);
 
 #ifndef TARGET_WIN32
+  /*
+   * Register udp socket in Nat traversal lib.
+   */
+  logf("%s: register udp socket, role: %s, sock: %d, port: %d", __FUNCTION__, 
+				  if_bind ? 
+				  "Server" : 
+				  "Client",
+				  sock, 
+				  port);
+  register_socket(if_bind ? 
+				  ROLE_Server : 
+				  ROLE_Client,
+				  sock, 
+				  port);
+
+  logf("%s: register udp socket done!", __FUNCTION__);
+#else
+  if(strcmp(host, TUN_DELEGATE_ADDR) != 0) {
+    /*
+     * Register udp socket in Nat traversal lib.
+     */
+    logf("%s: register udp socket, role: %d, sock: %d, port: %d", __FUNCTION__, 
+    				if_bind ? 
+    				"Server" : 
+    				"Client",
+    				sock, 
+    				port);
+    register_socket(if_bind ? 
+    				ROLE_Server : 
+    				ROLE_Client,
+    				sock, 
+    				port);
+    
+    logf("%s: register udp socket done!", __FUNCTION__);
+  }
+#endif
+
+#ifndef TARGET_WIN32
   flags = fcntl(sock, F_GETFL, 0);
   if (flags != -1) {
     if (-1 != fcntl(sock, F_SETFL, flags | O_NONBLOCK))
@@ -397,6 +435,7 @@ int vpn_ctx_init(vpn_ctx_t *ctx, shadowvpn_args_t *args) {
   /*
    * Do Nat traversal initialize work.
    */
+  logf("%s: nat traversal init", __FUNCTION__);
   nat_traversal_init(args->mode == SHADOWVPN_MODE_SERVER ? ROLE_Server : ROLE_Client);
   
   ctx->nsock = 1;
@@ -411,14 +450,6 @@ int vpn_ctx_init(vpn_ctx_t *ctx, shadowvpn_args_t *args) {
       close(ctx->tun);
       return -1;
     }
-    /*
-     * Register udp socket in Nat traversal lib.
-     */
-    register_socket(args->mode == SHADOWVPN_MODE_SERVER ? 
-    				ROLE_Server : 
-    				ROLE_Client,
-    				*sock, 
-    				args->port);
   }
   ctx->args = args;
   return 0;
