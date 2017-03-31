@@ -1,6 +1,6 @@
 bin_PROGRAMS = shadowvpn
 
-lib_LTLIBRARIES = libshadowvpn.la
+lib_LTLIBRARIES = libshadowvpn.la libnat.la
 
 SUBDIRS = ../libsodium
 
@@ -26,6 +26,12 @@ libshadowvpn_la_SOURCES = log.c \
 	uthash.h \
 	portable_endian.h
 
+libnat_la_SOURCES = nat_type.h \
+	nat_type.c \
+	nat_traversal.h \
+	nat_traversal.c \
+	uthash.h
+
 if WIN32
 libshadowvpn_la_SOURCES += win32.c win32.h
 endif
@@ -34,4 +40,4 @@ libshadowvpn_la_LIBADD = ../libsodium/src/libsodium/libsodium.la
 
 shadowvpn_SOURCES = main.c
 
-shadowvpn_LDADD = libshadowvpn.la
+shadowvpn_LDADD = libshadowvpn.la libnat.la
