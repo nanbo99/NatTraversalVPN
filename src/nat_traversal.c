@@ -239,9 +239,12 @@ void *nat_traversal_server_thread(void *param) {
 	send(cbsock, &msg, sizeof(msg), 0);
 	
     for(;;) {
-        if (recv(cbsock, &msg, sizeof(msg), 0) < 0) {
+        if ((ret = recv(cbsock, &msg, sizeof(msg), 0)) < 0) {
 			log_out("line %d, recv, %s\n", __LINE__, strerror(errno));
 			continue;
+		} else if(ret == 0) {
+			log_out("line %d, recv, remote server closed!\n", __LINE__);
+			break;
 		}
 		log_out("%s: role: %s, cmd: %s, ip: %s, port: %d\n", __FUNCTION__,
 				role_str[msg.role], cmd_str[msg.cmd], msg.ip, msg.port);
