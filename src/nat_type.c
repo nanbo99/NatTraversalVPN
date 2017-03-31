@@ -62,12 +62,13 @@ const char *nat_type2str(int type) {
  *              NAT_Port_Restricted_Cone;
  *
  */
-int request_nat_type_diff_port(int sock, uint32_t local_port, 
-                                char *remote_ip, uint32_t remote_port) {
-    int ret;
+int request_nat_type_diff_port(int sock, char *remote_ip, uint32_t remote_port) {
+    int ret, local_port;
     socklen_t addrlen = sizeof(struct sockaddr_in);
     struct sockaddr_in local_sockaddr, remote_sockaddr, sender_sockaddr;
     struct NATMsg msg, reply;
+    char local_ip[MAX_IP_SIZE];
+    
     msg.cmd = TRAVERSAL_GETNATTYPE;
     msg.cmd2 = NAT_COMM_GET_DFADDR;
     msg.role = ROLE_Client;
@@ -86,6 +87,14 @@ int request_nat_type_diff_port(int sock, uint32_t local_port,
         goto err_out;
     }
     
+    // get local sock addr.
+    if(getsockname(sock, (struct sockaddr*)&local_sockaddr, &addrlen) < 0) {
+        log_out("%s: getsockname: %s\n", __FUNCTION__, strerror(errno));
+        goto err_out;
+    }
+    local_port = ntohs(local_sockaddr.sin_port);
+    snprintf(local_ip, MAX_IP_SIZE, "%s", inet_ntoa(local_sockaddr.sin_addr));
+    
     // 2. recv response from port1, timeout: 2s.
     struct timeval tv;
 	tv.tv_sec = 2;
@@ -101,7 +110,7 @@ int request_nat_type_diff_port(int sock, uint32_t local_port,
         		inet_ntoa(sender_sockaddr.sin_addr), ntohs(sender_sockaddr.sin_port));
         
         log_out("%s: reply: (ip, port) = (%s, %d)\n", __FUNCTION__, reply.ip, reply.port);
-        if(local_port == reply.port)
+        if(local_port == reply.port && strncmp(local_ip, reply.ip, MAX_IP_SIZE) == 0)
             ret = NAT_None;
         else
             ret = NAT_Restricted_Cone;  /* or NAT_Full_Cone */
@@ -120,12 +129,13 @@ err_out:
     return ret;
 }
 
-int request_nat_type_multi_port(int sock, uint32_t local_port, char *remote_ip, 
-                                uint32_t remote_port0, uint32_t remote_port1) {
+int request_nat_type_multi_port(int sock, char *remote_ip, uint32_t remote_port0, 
+								uint32_t remote_port1) {
     int ret, outer_port0, outer_port1;
     socklen_t addrlen = sizeof(struct sockaddr_in);
     struct sockaddr_in local_sockaddr, remote_sockaddr, sender_sockaddr;
     struct NATMsg msg, reply;
+    
     msg.cmd = TRAVERSAL_GETNATTYPE;
     msg.cmd2 = NAT_COMM_GET_ADDR;
     msg.role = ROLE_Client;
@@ -166,7 +176,6 @@ int request_nat_type_multi_port(int sock, uint32_t local_port, char *remote_ip,
     outer_port1 = reply.port;
     
     // 3. compare two response's ip and port.
-    assert(local_port != outer_port0 && local_port != outer_port1);
     if(outer_port0 != outer_port1) {
         ret = NAT_Symmetric;
     } else {
@@ -177,24 +186,17 @@ int request_nat_type_multi_port(int sock, uint32_t local_port, char *remote_ip,
 
 int request_nat_type(char *remote_ip, int port0, int port1) {
     struct sockaddr_in local_sockaddr, remote_sockaddr, sender_sockaddr;
-    uint32_t local_port, outer_port0, outer_port1;
+    uint32_t outer_port0, outer_port1;
     socklen_t addrlen = sizeof(struct sockaddr);
     int ret, sock = socket(AF_INET, SOCK_DGRAM, 0);
     
     if(sock < 0) return -NAT_TYPE_MAX;
     
-    // get local sock addr.
-    if(getsockname(sock, (struct sockaddr*)&local_sockaddr, &addrlen) < 0) {
-        log_out("%s: getsockname: %s\n", __FUNCTION__, strerror(errno));
-        goto err_out;
-    }
-    local_port = ntohs(local_sockaddr.sin_port);
-    
     /*
      * Stage 1:
      *      can we recv response from diffrent port?
      */
-    if ((ret = request_nat_type_diff_port(sock, local_port, remote_ip, port0)) < 0) {
+    if ((ret = request_nat_type_diff_port(sock, remote_ip, port0)) < 0) {
         log_out("%s: request_nat_type_diff_port: %s\n", __FUNCTION__, "error!");
         goto err_out;
     } else if (ret < NAT_Port_Restricted_Cone) {
@@ -208,7 +210,7 @@ int request_nat_type(char *remote_ip, int port0, int port1) {
      *      is this Symmetric nat?
      */
     
-    if((ret = request_nat_type_multi_port(sock, local_port, remote_ip, port0, port1)) >= 0) {
+    if((ret = request_nat_type_multi_port(sock, remote_ip, port0, port1)) >= 0) {
         goto request_nat_type_out;
     } else {
         log_out("%s: request_nat_type_multi_port: %s\n", __FUNCTION__, "error!");

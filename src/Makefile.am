@@ -36,8 +36,9 @@ if WIN32
 libshadowvpn_la_SOURCES += win32.c win32.h
 endif
 
-libshadowvpn_la_LIBADD = ../libsodium/src/libsodium/libsodium.la
+libshadowvpn_la_LIBADD = ../libsodium/src/libsodium/libsodium.la ./libnat.la
 
 shadowvpn_SOURCES = main.c
 
-shadowvpn_LDADD = libshadowvpn.la libnat.la
+shadowvpn_LDADD = libshadowvpn.la -lpthread
+

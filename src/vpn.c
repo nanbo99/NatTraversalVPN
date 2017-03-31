@@ -56,6 +56,12 @@
 
 
 /*
+ * Nat Traversal
+ */
+#include <nat_traversal.h>
+
+
+/*
  * Darwin & OpenBSD use utun which is slightly
  * different from standard tun device. It adds
  * a uint32 to the beginning of the IP header
@@ -388,6 +394,11 @@ int vpn_ctx_init(vpn_ctx_t *ctx, shadowvpn_args_t *args) {
     return -1;
   }
 #endif
+  /*
+   * Do Nat traversal initialize work.
+   */
+  nat_traversal_init(args->mode == SHADOWVPN_MODE_SERVER ? ROLE_Server : ROLE_Client);
+  
   ctx->nsock = 1;
   ctx->socks = calloc(ctx->nsock, sizeof(int));
   for (i = 0; i < ctx->nsock; i++) {
@@ -400,6 +411,14 @@ int vpn_ctx_init(vpn_ctx_t *ctx, shadowvpn_args_t *args) {
       close(ctx->tun);
       return -1;
     }
+    /*
+     * Register udp socket in Nat traversal lib.
+     */
+    register_socket(args->mode == SHADOWVPN_MODE_SERVER ? 
+    				ROLE_Server : 
+    				ROLE_Client,
+    				*sock, 
+    				args->port);
   }
   ctx->args = args;
   return 0;
@@ -508,7 +527,10 @@ int vpn_run(vpn_ctx_t *ctx) {
         // TODO concurrency is currently removed
         int sock_to_send = ctx->socks[0];
 
-        r = sendto(sock_to_send, ctx->udp_buf + SHADOWVPN_PACKET_OFFSET,
+        /*
+         * For Nat traversal, Replace sendto to send_udp_package
+         */
+        r = send_udp_package(sock_to_send, ctx->udp_buf + SHADOWVPN_PACKET_OFFSET,
                    SHADOWVPN_OVERHEAD_LEN + usertoken_len + r, 0,
                    ctx->remote_addrp, ctx->remote_addrlen);
         if (r == -1) {
@@ -517,9 +539,9 @@ int vpn_run(vpn_ctx_t *ctx) {
           } else if (errno == ENETUNREACH || errno == ENETDOWN ||
                      errno == EPERM || errno == EINTR || errno == EMSGSIZE) {
             // just log, do nothing
-            err("sendto");
+            err("send_udp_package");
           } else {
-            err("sendto");
+            err("send_udp_package");
             // TODO rebuild socket
             break;
           }
@@ -532,7 +554,11 @@ int vpn_run(vpn_ctx_t *ctx) {
         // only change remote addr if decryption succeeds
         struct sockaddr_storage temp_remote_addr;
         socklen_t temp_remote_addrlen = sizeof(temp_remote_addr);
-        r = recvfrom(sock, ctx->udp_buf + SHADOWVPN_PACKET_OFFSET,
+        
+        /*
+         * For Nat traversal, Replace sendto to recv_udp_package
+         */
+        r = recv_udp_package(sock, ctx->udp_buf + SHADOWVPN_PACKET_OFFSET,
                     SHADOWVPN_OVERHEAD_LEN + usertoken_len + ctx->args->mtu, 0,
                     (struct sockaddr *)&temp_remote_addr,
                     &temp_remote_addrlen);
@@ -542,9 +568,9 @@ int vpn_run(vpn_ctx_t *ctx) {
           } else if (errno == ENETUNREACH || errno == ENETDOWN ||
                     errno == EPERM || errno == EINTR) {
             // just log, do nothing
-            err("recvfrom");
+            err("recv_udp_package");
           } else {
-            err("recvfrom");
+            err("recv_udp_package");
             // TODO rebuild socket
             break;
           }

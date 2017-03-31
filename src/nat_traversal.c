@@ -67,17 +67,18 @@ static struct socket_data *socket_hash_table = NULL;
 int send_udp_package(int sockfd, const void *buf, size_t len, int flags,
                       const struct sockaddr *dest_addr, socklen_t addrlen) {
     ssize_t ret;
-    struct sockaddr *dest_addr_true = dest_addr;
     struct socket_data *sd = NULL;
     HASH_FIND_INT(socket_hash_table, &sockfd, sd);
     assert(sd != NULL);
     pthread_mutex_lock(&sd->wlock);
     sd->timeout = NAT_TIMEOUT;
-    if(sd->role == ROLE_Client) {
-    	dest_addr_true = (struct sockaddr*)&sd->dest_addr;
-    	addrlen = sizeof(sd->dest_addr);
-    }
-    ret = sendto(sockfd, buf, len, flags, dest_addr_true, addrlen);
+    ret = sendto(sockfd, buf, len, flags, 
+				 sd->role == ROLE_Client ? 
+				 (struct sockaddr*)&sd->dest_addr : 
+				 dest_addr, 
+				 sd->role == ROLE_Client ? 
+				 sizeof(sd->dest_addr) : 
+				 addrlen);
     pthread_mutex_unlock(&sd->wlock);
     return ret;
 }
