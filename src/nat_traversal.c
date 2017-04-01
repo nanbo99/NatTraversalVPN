@@ -4,6 +4,7 @@
  */
 
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -61,8 +62,8 @@ struct socket_data {
 /* time out thread id. */
 static pthread_t client_thread_id = 0;
 static pthread_t server_thread_id = 0;
-static nat_type = -NAT_TYPE_MAX;
-static app_role = ROLE_Client;
+static int nat_type = -NAT_TYPE_MAX;
+static int app_role = ROLE_Client;
 static struct socket_data *socket_hash_table = NULL;
 
 int send_udp_package(int sockfd, const void *buf, size_t len, int flags,
@@ -148,20 +149,23 @@ int nat_traversal(enum ROLE role, int sock, struct sockaddr_in *remote_sockaddr,
 			log_out("line %d, sendmessage: error happend, will try again!\n", __LINE__);
 			continue;
 		}
+		
 		// 1. Server send SYNACK, and Client wait SYNACK.
-		msg.role = role;
-		msg.cmd = TRAVERSAL_SYNACK;
-		if (role == ROLE_Server && sendmessage(sock, remote_sockaddr, &msg) < 0) {
-			log_out("line %d, sendmessage: error happend, will try again!\n", __LINE__);
-			continue;
+		if (role == ROLE_Server) {
+			msg.role = role;
+			msg.cmd = TRAVERSAL_SYNACK;
+			if(sendmessage(sock, remote_sockaddr, &msg) < 0) {
+				log_out("line %d, sendmessage: error happend, will try again!\n", __LINE__);
+				continue;
+			}
 		} else if (role == ROLE_Client) {
 			if (recvmessage(sock, remote_sockaddr, &msg) < 0 || 
 				(msg.cmd != TRAVERSAL_SYN && msg.cmd != TRAVERSAL_SYNACK)) {
 				log_out("line %d, recvmessage: error happend, will try again!\n", __LINE__);
 				continue;
 			}
-			if (msg.cmd == TRAVERSAL_SYNACK) break;
 		}
+		
 		// 2. Client send ACK, and Server wait ACK.
 		msg.role = role;
 		msg.cmd = TRAVERSAL_ACK;
@@ -174,9 +178,9 @@ int nat_traversal(enum ROLE role, int sock, struct sockaddr_in *remote_sockaddr,
 				log_out("line %d, recvmessage: error happend, will try again!\n", __LINE__);
 				continue;
 			}
-			if (msg.cmd == TRAVERSAL_ACK) break;
 		}
-		// all things have been done.
+		
+		// All things done.
 		done = 1;
 		break;
 	}
@@ -206,7 +210,7 @@ void *nat_traversal_client_thread(void *param) {
 }
 
 void *nat_traversal_server_thread(void *param) {
-	int ret, cbsock, sockopt = 1;
+	int ret, cbsock, sockopt = 1, flags;
 	struct sockaddr_in remote_sockaddr, client_sockaddr;
 	struct socket_data *sd = NULL;
 	
@@ -250,28 +254,41 @@ void *nat_traversal_server_thread(void *param) {
 				role_str[msg.role], cmd_str[msg.cmd], msg.ip, msg.port);
 		if(msg.role == ROLE_Proxy && msg.cmd == TRAVERSAL_PUNCHHOLE) {
 			log_out("Recv punch hole request!\n");
-			memset(&client_sockaddr, 0, sizeof(client_sockaddr));
-			client_sockaddr.sin_family = AF_INET;
-			client_sockaddr.sin_port = htons(msg.port);
-			inet_aton(msg.ip, &client_sockaddr.sin_addr);
-			log_out("Punching hole...");
+			
 			sd = socket_hash_table;
 			//TODO: using the socket which port match with msg.port to do nat traversal
 			// for ( ... ) {
 			// 	   ...
 			// }
-			assert(sd != NULL);
-			// get all lock.
-			pthread_mutex_lock(&sd->rlock);
-			pthread_mutex_lock(&sd->wlock);
-			if (nat_traversal(ROLE_Server, sd->socket, &client_sockaddr, 10) < 0) {
-				log_out("line %d, %s: handshake with server failed!\n", 
-					__LINE__, __FUNCTION__);
+			
+			flags = fcntl(sd->socket, F_GETFL, 0);
+			if (flags == -1 || -1 == fcntl(sd->socket, F_SETFL, (flags & ~O_NONBLOCK))) {
+				printf("%s: fcntl: %s\n", __FUNCTION__, strerror(errno));
+				continue;
 			}
-			// get all lock.
+			
+			memset(&client_sockaddr, 0, sizeof(client_sockaddr));
+			client_sockaddr.sin_family = AF_INET;
+			client_sockaddr.sin_port = htons(msg.port);
+			inet_aton(msg.ip, &client_sockaddr.sin_addr);
+			
+			assert(sd != NULL);
+			log_out("Punching hole...");
+			
+			if (nat_traversal(ROLE_Server, sd->socket, &client_sockaddr, 10) < 0) {
+				log_out("failed!\n");
+			} else {
+				log_out("success!\n");
+			}
+			
+			flags = fcntl(sd->socket, F_GETFL, 0);
+			if (flags == -1 || -1 == fcntl(sd->socket, F_SETFL, flags | O_NONBLOCK)) {
+				printf("%s: fcntl: %s\n", __FUNCTION__, strerror(errno));
+			}
+			
+			// free all lock.
 			pthread_mutex_unlock(&sd->rlock);
 			pthread_mutex_unlock(&sd->wlock);
-			log_out("done!\n");
 		} else if(msg.role == ROLE_Proxy && msg.cmd == TRAVERSAL_TURN) {
 			// TODO: keep udp port connection with Nat Proxy Server.
 			// Client send heart beat to nat proxy server, and proxy server relay it to Server.
@@ -328,7 +345,11 @@ int register_socket(enum ROLE role, int sockfd, int listen_port) {
 		} else {
 			log_out("Punching hole...");
 			nat_traversal(app_role, sockfd, &server_sockaddr, 10);
-			log_out("done!\n");
+			if (nat_traversal(app_role, sockfd, &server_sockaddr, 10) < 0) {
+				log_out("failed!\n");
+			} else {
+				log_out("success!\n");
+			}
 		}
 		
 		tv.tv_sec = 2;
@@ -366,6 +387,15 @@ int register_socket(enum ROLE role, int sockfd, int listen_port) {
     pthread_mutex_init(&sd->wlock, NULL);
     
     HASH_ADD_INT(socket_hash_table, socket, sd);
+    
+    /*
+     * Server's udp socket will be locked until punch hole is success.
+     */
+    if(role == ROLE_Server) {
+    	pthread_mutex_lock(&sd->rlock);
+    	pthread_mutex_lock(&sd->wlock);
+    }
+    
     return 0;
 }
 
