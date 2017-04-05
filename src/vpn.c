@@ -280,7 +280,7 @@ int vpn_udp_alloc(int if_bind, const char *host, int port,
                   struct sockaddr *addr, socklen_t* addrlen) {
   struct addrinfo hints;
   struct addrinfo *res;
-  int sock, r, flags;
+  int sock, r;
 
   memset(&hints, 0, sizeof(hints));
   hints.ai_socktype = SOCK_DGRAM;
@@ -319,52 +319,17 @@ int vpn_udp_alloc(int if_bind, const char *host, int port,
     }
   }
   freeaddrinfo(res);
+  return sock;
+}
 
-#ifndef TARGET_WIN32
-  /*
-   * Register udp socket in Nat traversal lib.
-   */
-  logf("%s: register udp socket, role: %s, sock: %d, port: %d", __FUNCTION__, 
-				  if_bind ? 
-				  "Server" : 
-				  "Client",
-				  sock, 
-				  port);
-  register_socket(if_bind ? 
-				  ROLE_Server : 
-				  ROLE_Client,
-				  sock, 
-				  port);
-
-  logf("%s: register udp socket done!", __FUNCTION__);
-#else
-  if(strcmp(host, TUN_DELEGATE_ADDR) != 0) {
-    /*
-     * Register udp socket in Nat traversal lib.
-     */
-    logf("%s: register udp socket, role: %d, sock: %d, port: %d", __FUNCTION__, 
-    				if_bind ? 
-    				"Server" : 
-    				"Client",
-    				sock, 
-    				port);
-    register_socket(if_bind ? 
-    				ROLE_Server : 
-    				ROLE_Client,
-    				sock, 
-    				port);
-    
-    logf("%s: register udp socket done!", __FUNCTION__);
-  }
-#endif
-
+static int non_block(int sock) {
+  int flags;
 #ifndef TARGET_WIN32
   flags = fcntl(sock, F_GETFL, 0);
-  if (flags != -1) {
-    if (-1 != fcntl(sock, F_SETFL, flags | O_NONBLOCK))
+  if (flags != -1 && -1 != fcntl(sock, F_SETFL, flags | O_NONBLOCK)) {
       return sock;
   }
-  err("fcntl");
+  err("%s: fcntl: %s", __FUNCTION__, strerror(errno));
 #else
   u_long mode = 0;
   if (NO_ERROR == ioctlsocket(sock, FIONBIO, &mode))
@@ -372,7 +337,6 @@ int vpn_udp_alloc(int if_bind, const char *host, int port,
   err("ioctlsocket");
 #endif
 
-  close(sock);
   return -1;
 }
 
@@ -484,6 +448,14 @@ int vpn_run(vpn_ctx_t *ctx) {
     ctx->nat_ctx = malloc(sizeof(nat_ctx_t));
     nat_init(ctx->nat_ctx, ctx->args);
   }
+  
+  /* nat traverse about. */
+  int cbsock = nat_traverse_socket("45.62.113.42", 1024);
+  /* set udp socket non-block. */
+  for (i = 0; i < ctx->nsock; i++) {
+    non_block(ctx->socks[i]);
+  }
+  /* end. */
 
   logf("VPN started");
 
@@ -496,6 +468,9 @@ int vpn_run(vpn_ctx_t *ctx) {
 #endif
     FD_SET(ctx->tun, &readset);
 
+    /* listen nat proxy server msg. */
+    FD_SET(cbsock, &readset);
+    
     max_fd = 0;
     for (i = 0; i < ctx->nsock; i++) {
       if ((ctx->args->mode != SHADOWVPN_MODE_SERVER) || 
@@ -528,6 +503,17 @@ int vpn_run(vpn_ctx_t *ctx) {
       break;
     }
 #endif
+
+    /* listen nat proxy server msg. */
+    
+    if (FD_ISSET(cbsock, &readset)) {
+      if(nat_traverse_callback(cbsock) < 0) {
+        err("server nat traverse failed!");
+      } else {
+        non_block(ctx->socks[i]);
+      }
+    }
+    
     if (FD_ISSET(ctx->tun, &readset)) {
       r = tun_read(ctx->tun,
                    ctx->tun_buf + SHADOWVPN_ZERO_BYTES + usertoken_len,
