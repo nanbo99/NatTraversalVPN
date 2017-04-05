@@ -52,6 +52,7 @@ int send_udp_package(int sockfd, const void *buf, size_t len, int flags,
                       const struct sockaddr *dest_addr, socklen_t addrlen);
 int recv_udp_package(int sockfd, void *buf, size_t len, int flags,
                         struct sockaddr *src_addr, socklen_t *addrlen);
+int socket_usable(int sock);
 int register_socket(enum ROLE role, int sockfd, int listen_port);
 
 int nat_traversal(enum ROLE role, int sock, struct sockaddr_in *remote_sockaddr, int retrytimes);
