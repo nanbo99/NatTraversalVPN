@@ -57,6 +57,6 @@ int register_socket(enum ROLE role, int sockfd, int listen_port);
 
 int nat_traversal(enum ROLE role, int sock, struct sockaddr_in *remote_sockaddr, int retrytimes);
 
-int nat_traversal_init(enum ROLE role);
+int nat_traversal_init(enum ROLE role, int ctrlfd);
 
 #endif /* _NAT_TRAVERSAL_BASE_ */

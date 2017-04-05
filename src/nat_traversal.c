@@ -65,6 +65,7 @@ static pthread_t client_thread_id = 0;
 static pthread_t server_thread_id = 0;
 static int nat_type = -NAT_TYPE_MAX;
 static int app_role = ROLE_Client;
+static int ctrl_fd = -1;
 static struct socket_data *socket_hash_table = NULL;
 
 int send_udp_package(int sockfd, const void *buf, size_t len, int flags,
@@ -338,7 +339,12 @@ void *nat_traversal_server_thread(void *param) {
                 sd->initialized = 0;
                 log_out("failed!\n");
             } else {
+                char val = 1;
                 sd->initialized = 1;
+                // let vpn reload socket fd.
+                if (-1 == write(ctrl_fd, &val, 1)) {
+                    printf("%s: write: %s\n", __FUNCTION__, strerror(errno));
+                }
                 log_out("success!\n");
             }
             
@@ -468,10 +474,11 @@ int register_socket(enum ROLE role, int sockfd, int listen_port) {
     return 0;
 }
 
-int nat_traversal_init(enum ROLE role) {
+int nat_traversal_init(enum ROLE role, int ctrlfd) {
     int ret;
     nat_type = request_nat_type(PROXY_SERVER_IP, LISTEN_PORT0, LISTEN_PORT1);
     app_role = role;
+    ctrl_fd = ctrlfd;
     
     log_out("%s: %s's Nat type is: %s\n", __FUNCTION__, 
             role == ROLE_Server ? "Server" : "Client", nat_type2str(nat_type));

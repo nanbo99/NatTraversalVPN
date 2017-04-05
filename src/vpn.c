@@ -436,7 +436,7 @@ int vpn_ctx_init(vpn_ctx_t *ctx, shadowvpn_args_t *args) {
    * Do Nat traversal initialize work.
    */
   logf("%s: nat traversal init", __FUNCTION__);
-  nat_traversal_init(args->mode == SHADOWVPN_MODE_SERVER ? ROLE_Server : ROLE_Client);
+  nat_traversal_init(args->mode == SHADOWVPN_MODE_SERVER ? ROLE_Server : ROLE_Client, ctx->control_pipe[1]);
   
   ctx->nsock = 1;
   ctx->socks = calloc(ctx->nsock, sizeof(int));
@@ -518,7 +518,7 @@ int vpn_run(vpn_ctx_t *ctx) {
     if (FD_ISSET(ctx->control_pipe[0], &readset)) {
       char pipe_buf;
       (void)read(ctx->control_pipe[0], &pipe_buf, 1);
-      break;
+      if(!pipe_buf) break;
     }
 #else
     if (FD_ISSET(ctx->control_fd, &readset)) {
