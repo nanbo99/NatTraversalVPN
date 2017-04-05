@@ -238,6 +238,8 @@ int nat_traversal(enum ROLE role, int sock, struct sockaddr_in *remote_sockaddr,
                 break;
             }
             if(i <= 0) break;
+        } else {
+            break;
         }
         
         // All things done.
@@ -418,7 +420,6 @@ int register_socket(enum ROLE role, int sockfd, int listen_port) {
             need_relay = 1;
         } else {
             log_out("Punching hole...");
-            nat_traversal(app_role, sockfd, &server_sockaddr, 10);
             if (nat_traversal(app_role, sockfd, &server_sockaddr, 10) < 0) {
                 log_out("failed!\n");
             } else {
