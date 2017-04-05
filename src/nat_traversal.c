@@ -134,50 +134,108 @@ handshake state 4(NULL				ACK receivd)
  */
 int nat_traversal(enum ROLE role, int sock, struct sockaddr_in *remote_sockaddr, int retrytimes) {
 	int times = 0, done = 0;
-	struct TraversalMsg msg;
+	struct TraversalMsg msg, reply;
 	struct timeval tv;
 	if (role >= ROLE_MAX) return -1;
 	tv.tv_sec = 2;
 	tv.tv_usec = 0;
 	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&tv, sizeof(struct timeval));
-	for(times = 0; times < retrytimes; times++) {
-		int i;
-		// 0. send SYN.
-		msg.role = role;
-		msg.cmd = TRAVERSAL_SYN;
-		if (sendmessage(sock, remote_sockaddr, &msg) < 0) {
-			log_out("line %d, sendmessage: error happend, will try again!\n", __LINE__);
-			continue;
-		}
+	for(;;) {
+		int i, ret;
+		memset(&msg, 0, sizeof(msg));
 		
-		// 1. Server send SYNACK, and Client wait SYNACK.
-		if (role == ROLE_Server) {
-			msg.role = role;
-			msg.cmd = TRAVERSAL_SYNACK;
-			if(sendmessage(sock, remote_sockaddr, &msg) < 0) {
-				log_out("line %d, sendmessage: error happend, will try again!\n", __LINE__);
-				continue;
-			}
-		} else if (role == ROLE_Client) {
-			if (recvmessage(sock, remote_sockaddr, &msg) < 0 || 
-				(msg.cmd != TRAVERSAL_SYN && msg.cmd != TRAVERSAL_SYNACK)) {
-				log_out("line %d, recvmessage: error happend, will try again!\n", __LINE__);
-				continue;
-			}
-		}
-		
-		// 2. Client send ACK, and Server wait ACK.
+		// 1. Client/Server send and wait SYN, punch hole.
+		i = retrytimes;
 		msg.role = role;
-		msg.cmd = TRAVERSAL_ACK;
-		if (role == ROLE_Client && sendmessage(sock, remote_sockaddr, &msg) < 0) {
-			log_out("line %d, sendmessage: error happend, will try again!\n", __LINE__);
-			continue;
+        msg.cmd = TRAVERSAL_SYN;
+        while (--i) {
+            memset(&reply, 0, sizeof(reply));
+            if (sendmessage(sock, remote_sockaddr, &msg) < 0) {
+	            log_out("line %d, sendmessage: %s, will try again!\n", __LINE__, 
+		                strerror(errno));
+	            continue;
+            }
+            ret = recvmessage(sock, remote_sockaddr, &reply);
+            if (ret < 0) {
+		        log_out("line %d, recvmessage: %s, will try again!\n", __LINE__, 
+		                strerror(errno));
+		        continue;
+	        }
+	        if (reply.cmd != TRAVERSAL_SYN) {
+	            log_out("line %d, recv %s, but SYN is expected!\n", __LINE__, 
+	                    cmd_str[reply.cmd]);
+	            continue;
+	        }
+	        break;
+        }
+        if (i <= 0) break;
+        
+		if (role == ROLE_Client) {
+		    // 2. Client wait SYNACK.
+		    i = retrytimes;
+		    while (--i) {
+		        memset(&reply, 0, sizeof(reply));
+	            ret = recvmessage(sock, remote_sockaddr, &reply);
+	            if (ret < 0) {
+			        log_out("line %d, recvmessage: %s, will try again!\n", __LINE__, 
+			                strerror(errno));
+			        continue;
+		        }
+		        if (reply.cmd != TRAVERSAL_SYNACK) {
+		            log_out("line %d, recv %s, but SYNACK is expected!\n", __LINE__, 
+		                    cmd_str[reply.cmd]);
+		            continue;
+		        }
+		        break;
+	        }
+	        if(i <= 0) break;
+	        
+		    // 3. Client send ACK.
+		    i = retrytimes;
+		    msg.role = role;
+            msg.cmd = TRAVERSAL_ACK;
+		    while (--i) {
+	            if (sendmessage(sock, remote_sockaddr, &msg) < 0) {
+		            log_out("line %d, sendmessage: %s, will try again!\n", __LINE__, 
+			                strerror(errno));
+		            continue;
+	            }
+		        break;
+	        }
+	        if(i <= 0) break;
 		} else if (role == ROLE_Server) {
-			if (recvmessage(sock, remote_sockaddr, &msg) < 0 || 
-				(msg.cmd != TRAVERSAL_SYN && msg.cmd != TRAVERSAL_ACK)) {
-				log_out("line %d, recvmessage: error happend, will try again!\n", __LINE__);
-				continue;
-			}
+	        // 2. Server send SYNACK.
+	        i = retrytimes;
+	        msg.role = role;
+            msg.cmd = TRAVERSAL_SYNACK;
+		    while (--i) {
+	            if (sendmessage(sock, remote_sockaddr, &msg) < 0) {
+		            log_out("line %d, sendmessage: %s, will try again!\n", __LINE__, 
+			                strerror(errno));
+		            continue;
+	            }
+		        break;
+	        }
+	        if(i <= 0) break;
+		    
+		    // 3. Server wait ACK.
+		    i = retrytimes;
+		    while (--i) {
+		        memset(&reply, 0, sizeof(reply));
+	            ret = recvmessage(sock, remote_sockaddr, &reply);
+	            if (ret < 0) {
+			        log_out("line %d, recvmessage: %s, will try again!\n", __LINE__, 
+			                strerror(errno));
+			        continue;
+		        }
+		        if (reply.cmd != TRAVERSAL_ACK) {
+		            log_out("line %d, recv %s, but ACK is expected!\n", __LINE__, 
+		                    cmd_str[reply.cmd]);
+		            continue;
+		        }
+		        break;
+	        }
+	        if(i <= 0) break;
 		}
 		
 		// All things done.
