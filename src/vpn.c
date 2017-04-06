@@ -329,7 +329,7 @@ static int non_block(int sock) {
   if (flags != -1 && -1 != fcntl(sock, F_SETFL, flags | O_NONBLOCK)) {
       return sock;
   }
-  err("%s: fcntl: %s", __FUNCTION__, strerror(errno));
+  err("fcntl");
 #else
   u_long mode = 0;
   if (NO_ERROR == ioctlsocket(sock, FIONBIO, &mode))
@@ -347,7 +347,7 @@ static int max(int a, int b) {
 #endif
 
 int vpn_ctx_init(vpn_ctx_t *ctx, shadowvpn_args_t *args) {
-  int i;
+  int i, ctrl_fd;
 #ifdef TARGET_WIN32
   WORD wVersionRequested;
   WSADATA wsaData;
@@ -374,6 +374,7 @@ int vpn_ctx_init(vpn_ctx_t *ctx, shadowvpn_args_t *args) {
     err("pipe");
     return -1;
   }
+  ctrl_fd = ctx->control_pipe[1];
   if (-1 == (ctx->tun = vpn_tun_alloc(args->intf))) {
     errf("failed to create tun device");
     return -1;
@@ -386,6 +387,7 @@ int vpn_ctx_init(vpn_ctx_t *ctx, shadowvpn_args_t *args) {
     err("failed to create control socket");
     return -1;
   }
+  ctrl_fd = ctx->control_fd;
   if (NULL == (ctx->cleanEvent = CreateEvent(NULL, TRUE, FALSE, NULL))) {
     err("CreateEvent");
     return -1;
@@ -400,13 +402,13 @@ int vpn_ctx_init(vpn_ctx_t *ctx, shadowvpn_args_t *args) {
    * Do Nat traversal initialize work.
    */
   logf("%s: nat traversal init", __FUNCTION__);
-  nat_traversal_init(args->mode == SHADOWVPN_MODE_SERVER ? ROLE_Server : ROLE_Client, ctx->control_pipe[1]);
+  nat_traversal_init(args->mode == SHADOWVPN_MODE_SERVER ? ROLE_Server : ROLE_Client, ctrl_fd);
   
   ctx->nsock = 1;
   ctx->socks = calloc(ctx->nsock, sizeof(int));
   for (i = 0; i < ctx->nsock; i++) {
-    int *sock = ctx->socks + i;
-    if (-1 == (*sock = vpn_udp_alloc(args->mode == SHADOWVPN_MODE_SERVER,
+    int sock;
+    if (-1 == (sock = vpn_udp_alloc(args->mode == SHADOWVPN_MODE_SERVER,
                                      args->server, args->port,
                                      ctx->remote_addrp,
                                      &ctx->remote_addrlen))) {
@@ -414,6 +416,7 @@ int vpn_ctx_init(vpn_ctx_t *ctx, shadowvpn_args_t *args) {
       close(ctx->tun);
       return -1;
     }
+    register_socket(args->mode == SHADOWVPN_MODE_SERVER ? ROLE_Server : ROLE_Client, sock, args->port);
   }
   ctx->args = args;
   return 0;
@@ -448,16 +451,16 @@ int vpn_run(vpn_ctx_t *ctx) {
     ctx->nat_ctx = malloc(sizeof(nat_ctx_t));
     nat_init(ctx->nat_ctx, ctx->args);
   }
-  
-  /* nat traverse about. */
-  int cbsock = nat_traverse_socket("45.62.113.42", 1024);
-  /* set udp socket non-block. */
-  for (i = 0; i < ctx->nsock; i++) {
-    non_block(ctx->socks[i]);
-  }
-  /* end. */
 
   logf("VPN started");
+
+  /*
+   * Nat traverse: Get udp socket usable.
+   */
+  get_socket(ctx->socks, ctx->nsock * sizeof(int));
+  for (i = 0; i < ctx->nsock && ctx->socks[i] > 0; i++) {
+    non_block(ctx->socks[i]);
+  }
 
   while (ctx->running) {
     FD_ZERO(&readset);
@@ -468,16 +471,10 @@ int vpn_run(vpn_ctx_t *ctx) {
 #endif
     FD_SET(ctx->tun, &readset);
 
-    /* listen nat proxy server msg. */
-    FD_SET(cbsock, &readset);
-    
     max_fd = 0;
     for (i = 0; i < ctx->nsock; i++) {
-      if ((ctx->args->mode != SHADOWVPN_MODE_SERVER) || 
-            (ctx->args->mode == SHADOWVPN_MODE_SERVER && socket_usable(ctx->socks[i]))) {
-        FD_SET(ctx->socks[i], &readset);
-        max_fd = max(max_fd, ctx->socks[i]);
-      }
+      FD_SET(ctx->socks[i], &readset);
+      max_fd = max(max_fd, ctx->socks[i]);
     }
 
     // we assume that pipe fd is always less than tun and sock fd which are
@@ -492,28 +489,33 @@ int vpn_run(vpn_ctx_t *ctx) {
     }
 #ifndef TARGET_WIN32
     if (FD_ISSET(ctx->control_pipe[0], &readset)) {
-      char pipe_buf;
-      (void)read(ctx->control_pipe[0], &pipe_buf, 1);
+      int pipe_buf;
+      (void)read(ctx->control_pipe[0], &pipe_buf, sizeof(int));
       if(!pipe_buf) break;
+      non_block(pipe_buf);
+      /* Nat traverse: add udp socket to select's readset. */
+      for(i = 0; i < ctx->nsock; i++) {
+        if(!ctx->socks[i]) {
+          ctx->socks[i] = pipe_buf;
+          break;
+        }
+      }
     }
 #else
     if (FD_ISSET(ctx->control_fd, &readset)) {
-      char buf;
-      recv(ctx->control_fd, &buf, 1, 0);
-      break;
-    }
-#endif
-
-    /* listen nat proxy server msg. */
-    
-    if (FD_ISSET(cbsock, &readset)) {
-      if(nat_traverse_callback(cbsock) < 0) {
-        err("server nat traverse failed!");
-      } else {
-        non_block(ctx->socks[i]);
+      int buf;
+      recv(ctx->control_fd, &buf, sizeof(int), 0);
+      if(!buf) break;
+      non_block(buf);
+      /* Nat traverse: add udp socket to select's readset. */
+      for(i = 0; i < ctx->nsock; i++) {
+        if(!ctx->socks[i]) {
+          ctx->socks[i] = buf;
+          break;
+        }
       }
     }
-    
+#endif
     if (FD_ISSET(ctx->tun, &readset)) {
       r = tun_read(ctx->tun,
                    ctx->tun_buf + SHADOWVPN_ZERO_BYTES + usertoken_len,
@@ -548,9 +550,9 @@ int vpn_run(vpn_ctx_t *ctx) {
         int sock_to_send = ctx->socks[0];
 
         /*
-         * For Nat traversal, Replace sendto to send_udp_package
+         * For Nat traversal, Replace sendto to sendto
          */
-        r = send_udp_package(sock_to_send, ctx->udp_buf + SHADOWVPN_PACKET_OFFSET,
+        r = sendto(sock_to_send, ctx->udp_buf + SHADOWVPN_PACKET_OFFSET,
                    SHADOWVPN_OVERHEAD_LEN + usertoken_len + r, 0,
                    ctx->remote_addrp, ctx->remote_addrlen);
         if (r == -1) {
@@ -559,9 +561,9 @@ int vpn_run(vpn_ctx_t *ctx) {
           } else if (errno == ENETUNREACH || errno == ENETDOWN ||
                      errno == EPERM || errno == EINTR || errno == EMSGSIZE) {
             // just log, do nothing
-            err("send_udp_package");
+            err("sendto");
           } else {
-            err("send_udp_package");
+            err("sendto");
             // TODO rebuild socket
             break;
           }
@@ -576,9 +578,9 @@ int vpn_run(vpn_ctx_t *ctx) {
         socklen_t temp_remote_addrlen = sizeof(temp_remote_addr);
         
         /*
-         * For Nat traversal, Replace sendto to recv_udp_package
+         * For Nat traversal, Replace sendto to recvfrom
          */
-        r = recv_udp_package(sock, ctx->udp_buf + SHADOWVPN_PACKET_OFFSET,
+        r = recvfrom(sock, ctx->udp_buf + SHADOWVPN_PACKET_OFFSET,
                     SHADOWVPN_OVERHEAD_LEN + usertoken_len + ctx->args->mtu, 0,
                     (struct sockaddr *)&temp_remote_addr,
                     &temp_remote_addrlen);
@@ -588,9 +590,9 @@ int vpn_run(vpn_ctx_t *ctx) {
           } else if (errno == ENETUNREACH || errno == ENETDOWN ||
                     errno == EPERM || errno == EINTR) {
             // just log, do nothing
-            err("recv_udp_package");
+            err("recvfrom");
           } else {
-            err("recv_udp_package");
+            err("recvfrom");
             // TODO rebuild socket
             break;
           }
@@ -640,6 +642,9 @@ int vpn_run(vpn_ctx_t *ctx) {
   free(ctx->udp_buf);
 
   shell_down(ctx->args);
+  
+  // Do clean for nat traverse.
+  nat_traversal_deinit();
 
   close(ctx->tun);
   for (i = 0; i < ctx->nsock; i++) {
@@ -664,9 +669,9 @@ int vpn_stop(vpn_ctx_t *ctx) {
     return -1;
   }
   ctx->running = 0;
-  char buf = 0;
+  int buf = 0;
 #ifndef TARGET_WIN32
-  if (-1 == write(ctx->control_pipe[1], &buf, 1)) {
+  if (-1 == write(ctx->control_pipe[1], &buf, sizeof(int))) {
     err("write");
     return -1;
   }
@@ -679,7 +684,7 @@ int vpn_stop(vpn_ctx_t *ctx) {
     errf("failed to init control socket");
     return -1;
   }
-  if (-1 == sendto(send_sock, &buf, 1, 0, &ctx->control_addr,
+  if (-1 == sendto(send_sock, &buf, sizeof(int), 0, &ctx->control_addr,
                    ctx->control_addrlen)) {
     err("sendto");
     close(send_sock);

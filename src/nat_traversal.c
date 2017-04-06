@@ -54,8 +54,7 @@ struct socket_data {
     int port;                        /* Key of hash table port_hash_table. */
     int need_relay;
     int timeout;
-    int initialized;
-    pthread_mutex_t rlock, wlock;
+    int nat_traversed;
     struct sockaddr_in dest_addr;
     UT_hash_handle hh;
 };
@@ -63,42 +62,12 @@ struct socket_data {
 /* time out thread id. */
 static pthread_t client_thread_id = 0;
 static pthread_t server_thread_id = 0;
+static int client_thread_running = 0;
+static int server_thread_running = 0;
 static int nat_type = -NAT_TYPE_MAX;
 static int app_role = ROLE_Client;
 static int ctrl_fd = -1;
 static struct socket_data *socket_hash_table = NULL;
-
-int send_udp_package(int sockfd, const void *buf, size_t len, int flags,
-                      const struct sockaddr *dest_addr, socklen_t addrlen) {
-    ssize_t ret;
-    struct socket_data *sd = NULL;
-    HASH_FIND_INT(socket_hash_table, &sockfd, sd);
-    assert(sd != NULL);
-    pthread_mutex_lock(&sd->wlock);
-    sd->timeout = NAT_TIMEOUT;
-    ret = sendto(sockfd, buf, len, flags, 
-                 sd->role == ROLE_Client ? 
-                 (struct sockaddr*)&sd->dest_addr : 
-                 dest_addr, 
-                 sd->role == ROLE_Client ? 
-                 sizeof(sd->dest_addr) : 
-                 addrlen);
-    pthread_mutex_unlock(&sd->wlock);
-    return ret;
-}
-
-int recv_udp_package(int sockfd, void *buf, size_t len, int flags,
-                        struct sockaddr *src_addr, socklen_t *addrlen) {
-    ssize_t ret;
-    struct socket_data *sd = NULL;
-    HASH_FIND_INT(socket_hash_table, &sockfd, sd);
-    assert(sd != NULL);
-    pthread_mutex_lock(&sd->rlock);
-    sd->timeout = NAT_TIMEOUT;
-    ret = recvfrom(sockfd, buf, len, flags, src_addr, addrlen);
-    pthread_mutex_unlock(&sd->rlock);
-    return ret;
-}
 
 /*
  * send tcp message.
@@ -120,7 +89,7 @@ ssize_t sendall(int sockfd, const void *buf, size_t len, int flags) {
 ssize_t recvall(int sockfd, void *buf, size_t len, int flags) {
     ssize_t recvd, index = 0, left = len;
     while(left <= 0) {
-        recvd = recv(sockfd, (const char *)buf + index, left, flags);
+        recvd = recv(sockfd, (char *)buf + index, left, flags);
         if(recvd <= 0) {
             log_out("%s: recv: %s\n", __FUNCTION__, strerror(errno));
             return recvd;
@@ -291,8 +260,9 @@ int nat_traversal(enum ROLE role, int sock, struct sockaddr_in *remote_sockaddr,
 static const char fake_response[20];
 void *nat_traversal_client_thread(void *param) {
     struct socket_data *sd = NULL;
-    for(;;) {
+    while(client_thread_running) {
         // send heart beat, bad package will dropped by shadowVPN.
+        /*
         for(sd = socket_hash_table; sd != NULL && !sd->need_relay; sd = sd->hh.next) {
             if(sd->timeout <= 0) {
                 assert(sd->dest_addr.sin_port != 0);
@@ -302,12 +272,13 @@ void *nat_traversal_client_thread(void *param) {
                 sd->timeout--;
             }
         }
+        */
         sleep(1);
     }
 }
 
 void *nat_traversal_server_thread(void *param) {
-    int ret, cbsock, sockopt = 1, flags;
+    int ret, cbsock, sockopt = 1;
     struct sockaddr_in remote_sockaddr, client_sockaddr;
     struct socket_data *sd = NULL;
     
@@ -321,15 +292,15 @@ void *nat_traversal_server_thread(void *param) {
     // 0. Server register in Proxy.
     if(setsockopt(cbsock, SOL_SOCKET, SO_KEEPALIVE, &sockopt, sizeof(sockopt)) < 0) {
         log_out("line %d, setsockopt, %s\n", __LINE__, strerror(errno));
-        ret = -1;
-        goto nat_traversal_server_thread_err_out;
+        close(cbsock);
+        return (void*)-1;
     }
     
     log_out("connect to nat proxy(ip: %s, port: %d)\n", PROXY_SERVER_IP, LISTEN_PORT0);
     if(connect(cbsock, (struct sockaddr*)&remote_sockaddr, sizeof(remote_sockaddr)) < 0) {
         log_out("line %d, connect, %s\n", __LINE__, strerror(errno));
-        ret = -1;
-        goto nat_traversal_server_thread_err_out;
+        close(cbsock);
+        return (void*)-1;
     }
     
     struct TraversalMsg msg;
@@ -339,16 +310,19 @@ void *nat_traversal_server_thread(void *param) {
     // long live tcp connection register.
     send(cbsock, &msg, sizeof(msg), 0);
     
-    for(;;) {
-        if ((ret = recv(cbsock, &msg, sizeof(msg), 0)) < 0) {
-            log_out("line %d, recv, %s\n", __LINE__, strerror(errno));
+    while(server_thread_running) {
+        // TODO: when stop server thread, make sure thread will not block at recv.
+        if ((ret = recvall(cbsock, &msg, sizeof(msg), 0)) < 0) {
+            log_out("line %d, recvall, %s\n", __LINE__, strerror(errno));
             continue;
         } else if(ret == 0) {
-            log_out("line %d, recv, remote server closed!\n", __LINE__);
+            log_out("line %d, recvall, remote server closed!\n", __LINE__);
             break;
         }
+        
         log_out("%s: role: %s, cmd: %s, ip: %s, port: %d\n", __FUNCTION__,
                 role_str[msg.role], cmd_str[msg.cmd], msg.ip, msg.port);
+        
         if(msg.role == ROLE_Proxy && msg.cmd == TRAVERSAL_PUNCHHOLE) {
             log_out("Recv punch hole request!\n");
             
@@ -357,12 +331,6 @@ void *nat_traversal_server_thread(void *param) {
             // for ( ... ) {
             //        ...
             // }
-            
-            flags = fcntl(sd->socket, F_GETFL, 0);
-            if (flags == -1 || -1 == fcntl(sd->socket, F_SETFL, (flags & ~O_NONBLOCK))) {
-                printf("%s: fcntl: %s\n", __FUNCTION__, strerror(errno));
-                continue;
-            }
             
             memset(&client_sockaddr, 0, sizeof(client_sockaddr));
             client_sockaddr.sin_family = AF_INET;
@@ -373,159 +341,27 @@ void *nat_traversal_server_thread(void *param) {
             log_out("Punching hole...");
             
             if (nat_traversal(ROLE_Server, sd->socket, &client_sockaddr, 10) < 0) {
-                sd->initialized = 0;
+                sd->nat_traversed = 0;
                 log_out("failed!\n");
             } else {
-                char val = 1;
-                sd->initialized = 1;
-                // let vpn reload socket fd.
-                if (-1 == write(ctrl_fd, &val, 1)) {
+                sd->nat_traversed = 1;
+                log_out("success!\n");
+                // let vpn select this udp socket.
+                if (-1 == write(ctrl_fd, &sd->socket, sizeof(int))) {
                     printf("%s: write: %s\n", __FUNCTION__, strerror(errno));
                 }
-                log_out("success!\n");
             }
-            
-            flags = fcntl(sd->socket, F_GETFL, 0);
-            if (flags == -1 || -1 == fcntl(sd->socket, F_SETFL, flags | O_NONBLOCK)) {
-                printf("%s: fcntl: %s\n", __FUNCTION__, strerror(errno));
-            }
-            
-            // free all lock.
-            pthread_mutex_unlock(&sd->rlock);
-            pthread_mutex_unlock(&sd->wlock);
         } else if(msg.role == ROLE_Proxy && msg.cmd == TRAVERSAL_TURN) {
             // TODO: keep udp port connection with Nat Proxy Server.
             // Client send heart beat to nat proxy server, and proxy server relay it to Server.
         }
     }
-    ret = 0;
-nat_traversal_server_thread_err_out:
     close(cbsock);
-    return (void*)ret;
-}
-
-int nat_traverse_socket(const char *proxy_server, int port) {
-    int ret, cbsock, sockopt = 1, flags;
-    struct sockaddr_storage remote_sockaddr;
-    socklen_t addrlen;
-    struct addrinfo hints;
-    struct addrinfo *res;
-
-    /* Parse proxy_server addr. */
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
-    if (0 != (ret = getaddrinfo(host, NULL, &hints, &res))) {
-        log_out("getaddrinfo: %s", gai_strerror(r));
-        return -1;
-    }
-
-    if (res->ai_family == AF_INET)
-        ((struct sockaddr_in *)res->ai_addr)->sin_port = htons(port);
-    else if (res->ai_family == AF_INET6)
-        ((struct sockaddr_in6 *)res->ai_addr)->sin6_port = htons(port);
-    else {
-        log_out("unknown ai_family %d", res->ai_family);
-        freeaddrinfo(res);
-        return -1;
-    }
-    /* TODO: adapt to ipv6 and other sock addr, sockaddr_in only used by ipv4. */
-    memcpy(&remote_sockaddr, res->ai_addr, res->ai_addrlen);
-    addrlen = res->ai_addrlen;
-    
-    if((cbsock = socket(res->ai_family, SOCK_STREAM, IPPROTO_TCP)) < 0) {
-        log_out("%s: socket, %s\n", __FUNCTION__, strerror(errno));
-        freeaddrinfo(res);
-        return -1;
-    }
-    
-    // long live socket connected with nat proxy server.
-    if((ret = setsockopt(cbsock, SOL_SOCKET, SO_KEEPALIVE, &sockopt, sizeof(sockopt))) < 0) {
-        log_out("%s: setsockopt, %s\n", __FUNCTION__, strerror(errno));
-        goto err_out;
-    }
-    
-    log_out("connect to nat proxy(ip: %s, port: %d)\n", PROXY_SERVER_IP, LISTEN_PORT0);
-    
-    if((ret = connect(cbsock, res->ai_addr, res->ai_addrlen)) < 0) {
-        log_out("%s: connect, %s\n", __FUNCTION__, strerror(errno));
-        goto err_out;
-    }
-    
-    struct TraversalMsg msg;
-    msg.role = ROLE_Server;
-    msg.cmd = TRAVERSAL_REGISTER;
-    
-    // Register tcp connection in nat proxy server.
-    if(sendall(cbsock, &msg, sizeof(msg), 0) < 0) {
-        log_out("%s: sendall, %s\n", __FUNCTION__, strerror(errno));
-        goto err_out;
-    }
-    freeaddrinfo(res);
-    return cbsock;
-err_out:
-    freeaddrinfo(res);
-    close(cbsock);
-    return ret;
-}
-
-int nat_traverse_callback(int sock) {
-    int ret, sockopt = 1, flags;
-    struct sockaddr_in remote_sockaddr, client_sockaddr;
-    struct socket_data *sd = NULL;
-    
-    if ((ret = recvall(sock, &msg, sizeof(msg), 0)) < 0) {
-        log_out("%s: recvall, %s\n", __FUNCTION__, strerror(errno));
-        return ret;
-    } else if(ret == 0) {
-        log_out("line %d, recvall, remote server closed!\n", __LINE__);
-        return ret;
-    }
-    
-    log_out("%s: role: %s, cmd: %s, ip: %s, port: %d\n", __FUNCTION__,
-            role_str[msg.role], cmd_str[msg.cmd], msg.ip, msg.port);
-    
-    if(msg.role == ROLE_Proxy && msg.cmd == TRAVERSAL_PUNCHHOLE) {
-        log_out("Recv punch hole request!\n");
-        
-        sd = socket_hash_table;
-        //TODO: using the socket which port match with msg.port to do nat traversal
-        // for ( ... ) {
-        //        ...
-        // }
-        
-        memset(&client_sockaddr, 0, sizeof(client_sockaddr));
-        client_sockaddr.sin_family = AF_INET;
-        client_sockaddr.sin_port = htons(msg.port);
-        inet_aton(msg.ip, &client_sockaddr.sin_addr);
-        
-        assert(sd != NULL);
-        log_out("Punching hole...");
-        
-        if (nat_traversal(ROLE_Server, sd->socket, &client_sockaddr, 10) < 0) {
-            log_out("failed!\n");
-            ret = -1;
-        } else {
-            log_out("success!\n");
-            ret = 0;
-        }
-    } else if(msg.role == ROLE_Proxy && msg.cmd == TRAVERSAL_TURN) {
-        // TODO: keep udp port connection with Nat Proxy Server.
-        // Client send heart beat to nat proxy server, and proxy server relay it to Server.
-    }
-    
-    return ret;
-}
-
-int socket_usable(int sock) {
-    struct socket_data *sd = NULL;
-    HASH_FIND_INT(socket_hash_table, &sock, sd);
-    if(sd == NULL) return 0;
-    return sd->initialized;
+    return (void*)0;
 }
 
 int register_socket(enum ROLE role, int sockfd, int listen_port) {
-    int ret, need_relay = 0;
+    int ret, need_relay = 0, nat_traversed = 0;
     struct socket_data *sd;
     struct sockaddr_in remote_sockaddr, server_sockaddr;
     
@@ -539,6 +375,8 @@ int register_socket(enum ROLE role, int sockfd, int listen_port) {
     if(role == ROLE_Client) {
         struct TraversalMsg msg, reply;
         struct timeval tv;
+        char cmd[128];
+        
         tv.tv_sec = 2;
         tv.tv_usec = 0;
         setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (char*)&tv, sizeof(struct timeval));
@@ -569,15 +407,23 @@ int register_socket(enum ROLE role, int sockfd, int listen_port) {
         } else {
             log_out("Punching hole...");
             if (nat_traversal(app_role, sockfd, &server_sockaddr, 10) < 0) {
+                nat_traversed = 0;
                 log_out("failed!\n");
             } else {
+                nat_traversed = 1;
                 log_out("success!\n");
             }
         }
         
-        tv.tv_sec = 2;
+        tv.tv_sec = 0;
         tv.tv_usec = 0;
         setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (char*)&tv, sizeof(struct timeval));
+        
+        /*
+         * Add route rule for client to server.
+         */
+        snprintf(cmd, 128, "ip route add %s via $(ip route show 0/0 | sed -e 's/.* via \\([^ ]*\\).*/\\1/')", reply.ip);
+        system(cmd);
     } else if(role == ROLE_Server) {
         // For Server, nat_type must get first, NAT_None don't need nat traverse.
         assert(nat_type >= 0 && nat_type < NAT_TYPE_MAX);
@@ -604,22 +450,25 @@ int register_socket(enum ROLE role, int sockfd, int listen_port) {
     sd->port = listen_port;
     sd->need_relay = need_relay;
     sd->timeout = NAT_TIMEOUT;
-    sd->initialized = 0;
+    sd->nat_traversed = nat_traversed;
     if(role == ROLE_Client)
         sd->dest_addr = server_sockaddr;
-    pthread_mutex_init(&sd->rlock, NULL);
-    pthread_mutex_init(&sd->wlock, NULL);
     
     HASH_ADD_INT(socket_hash_table, socket, sd);
-    
-    /*
-     * Server's udp socket will be locked until punch hole is success.
-     */
-    if(role == ROLE_Server) {
-        pthread_mutex_lock(&sd->rlock);
-        pthread_mutex_lock(&sd->wlock);
+    return 0;
+}
+
+int get_socket(void *buf, size_t len) {
+    int *socks = buf, i;
+    struct socket_data *sd = NULL;
+    if ((len % sizeof(int)) != 0) return -1;
+    for (sd = socket_hash_table, i = 0; 
+         sd != NULL && i < len / sizeof(int); 
+         sd = sd->hh.next) {
+        if(sd->nat_traversed) {
+            socks[i++] = sd->socket;
+        }
     }
-    
     return 0;
 }
 
@@ -636,16 +485,33 @@ int nat_traversal_init(enum ROLE role, int ctrlfd) {
     
     // Client keep udp channel open.
     if(role == ROLE_Client && !client_thread_id) {
-        ret = pthread_create(&client_thread_id, NULL, 
-                                nat_traversal_client_thread, NULL);
+        if((ret = pthread_create(&client_thread_id, NULL, nat_traversal_client_thread, NULL)) == 0) {
+            client_thread_running = 1;
+        } else {
+            log_out("%s: pthread_create: %s\n", __FUNCTION__, strerror(ret));
+        }
     }
     // Server keep connection with Nat Proxy Server.
     if(role == ROLE_Server && !server_thread_id) {
-        ret = pthread_create(&server_thread_id, NULL, 
-                                nat_traversal_server_thread, NULL);
+        if((ret = pthread_create(&server_thread_id, NULL, nat_traversal_server_thread, NULL)) == 0) {
+            server_thread_running = 1;
+        } else {
+            log_out("%s: pthread_create: %s\n", __FUNCTION__, strerror(ret));
+        }
     }
     
     return 0;
 }
 
+int nat_traversal_deinit() {
+    int ret;
+    char cmd[128];
+    client_thread_running = 0;
+    server_thread_running = 0;
+    
+    // Delete route rule, client always use a single server addr.
+    snprintf(cmd, 128, "ip route del %s", inet_ntoa(socket_hash_table->dest_addr.sin_addr));
+    ret = system(cmd);
+    return ret ? -1 : 0;
+}
 
