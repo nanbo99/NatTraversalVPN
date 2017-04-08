@@ -48,11 +48,16 @@ enum TRAVERSAL_COMM {
 	TRAVERSAL_MAX
 };
 
+int get_socket_remote_addr(int sock, struct sockaddr *remote_sockaddr, 
+                           socklen_t addrlen);
 int get_socket(void *buf, size_t len);
-int nat_traversal(enum ROLE role, int sock, struct sockaddr_in *remote_sockaddr, int retrytimes);
+
+int nat_traversal(enum ROLE role, int sock, 
+                  struct sockaddr_in *remote_sockaddr, int retrytimes);
 int register_socket(enum ROLE role, int sockfd, int listen_port);
 
 int nat_traversal_init(enum ROLE role, int ctrlfd);
+
 int nat_traversal_deinit();
 
 

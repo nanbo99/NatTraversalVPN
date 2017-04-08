@@ -416,7 +416,12 @@ int vpn_ctx_init(vpn_ctx_t *ctx, shadowvpn_args_t *args) {
       close(ctx->tun);
       return -1;
     }
+    /*
+     *  Nat traversal: punch hole and set remote_addr for client's udp socket.
+     */
     register_socket(args->mode == SHADOWVPN_MODE_SERVER ? ROLE_Server : ROLE_Client, sock, args->port);
+    if(args->mode != SHADOWVPN_MODE_SERVER)
+      get_socket_remote_addr(sock, ctx->remote_addrp, ctx->remote_addrlen);
   }
   ctx->args = args;
   return 0;
@@ -473,8 +478,10 @@ int vpn_run(vpn_ctx_t *ctx) {
 
     max_fd = 0;
     for (i = 0; i < ctx->nsock; i++) {
-      FD_SET(ctx->socks[i], &readset);
-      max_fd = max(max_fd, ctx->socks[i]);
+      if (ctx->socks[i] > 0) {
+        FD_SET(ctx->socks[i], &readset);
+        max_fd = max(max_fd, ctx->socks[i]);
+      }
     }
 
     // we assume that pipe fd is always less than tun and sock fd which are
@@ -492,6 +499,7 @@ int vpn_run(vpn_ctx_t *ctx) {
       int pipe_buf;
       (void)read(ctx->control_pipe[0], &pipe_buf, sizeof(int));
       if(!pipe_buf) break;
+      printf("add udp socket(%d) to fdset.\n", pipe_buf);
       non_block(pipe_buf);
       /* Nat traverse: add udp socket to select's readset. */
       for(i = 0; i < ctx->nsock; i++) {
@@ -550,22 +558,24 @@ int vpn_run(vpn_ctx_t *ctx) {
         int sock_to_send = ctx->socks[0];
 
         /*
-         * For Nat traversal, Replace sendto to sendto
+         * For Nat traversal, sendto only when sock_to_send is usable.
          */
-        r = sendto(sock_to_send, ctx->udp_buf + SHADOWVPN_PACKET_OFFSET,
-                   SHADOWVPN_OVERHEAD_LEN + usertoken_len + r, 0,
-                   ctx->remote_addrp, ctx->remote_addrlen);
-        if (r == -1) {
-          if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            // do nothing
-          } else if (errno == ENETUNREACH || errno == ENETDOWN ||
-                     errno == EPERM || errno == EINTR || errno == EMSGSIZE) {
-            // just log, do nothing
-            err("sendto");
-          } else {
-            err("sendto");
-            // TODO rebuild socket
-            break;
+        if (sock_to_send) {
+          r = sendto(sock_to_send, ctx->udp_buf + SHADOWVPN_PACKET_OFFSET,
+                     SHADOWVPN_OVERHEAD_LEN + usertoken_len + r, 0,
+                     ctx->remote_addrp, ctx->remote_addrlen);
+          if (r == -1) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+              // do nothing
+            } else if (errno == ENETUNREACH || errno == ENETDOWN ||
+                       errno == EPERM || errno == EINTR || errno == EMSGSIZE) {
+              // just log, do nothing
+              err("sendto");
+            } else {
+              err("sendto");
+              // TODO rebuild socket
+              break;
+            }
           }
         }
       }
@@ -577,9 +587,6 @@ int vpn_run(vpn_ctx_t *ctx) {
         struct sockaddr_storage temp_remote_addr;
         socklen_t temp_remote_addrlen = sizeof(temp_remote_addr);
         
-        /*
-         * For Nat traversal, Replace sendto to recvfrom
-         */
         r = recvfrom(sock, ctx->udp_buf + SHADOWVPN_PACKET_OFFSET,
                     SHADOWVPN_OVERHEAD_LEN + usertoken_len + ctx->args->mtu, 0,
                     (struct sockaddr *)&temp_remote_addr,

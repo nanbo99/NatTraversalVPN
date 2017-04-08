@@ -74,7 +74,7 @@ static struct socket_data *socket_hash_table = NULL;
  */
 ssize_t sendall(int sockfd, const void *buf, size_t len, int flags) {
     ssize_t sent, index = 0, left = len;
-    while(left <= 0) {
+    while(left > 0) {
         sent = send(sockfd, (const char *)buf + index, left, flags);
         if(sent <= 0) {
             log_out("%s: send: %s\n", __FUNCTION__, strerror(errno));
@@ -88,7 +88,7 @@ ssize_t sendall(int sockfd, const void *buf, size_t len, int flags) {
 
 ssize_t recvall(int sockfd, void *buf, size_t len, int flags) {
     ssize_t recvd, index = 0, left = len;
-    while(left <= 0) {
+    while(left > 0) {
         recvd = recv(sockfd, (char *)buf + index, left, flags);
         if(recvd <= 0) {
             log_out("%s: recv: %s\n", __FUNCTION__, strerror(errno));
@@ -365,8 +365,6 @@ int register_socket(enum ROLE role, int sockfd, int listen_port) {
     struct socket_data *sd;
     struct sockaddr_in remote_sockaddr, server_sockaddr;
     
-    log_out("%s: enter, role: %d\n", __FUNCTION__, role);
-    
     memset(&remote_sockaddr, 0, sizeof(remote_sockaddr));
     remote_sockaddr.sin_family = AF_INET;
     remote_sockaddr.sin_port = htons(LISTEN_PORT0);
@@ -469,6 +467,16 @@ int get_socket(void *buf, size_t len) {
             socks[i++] = sd->socket;
         }
     }
+    return 0;
+}
+
+int get_socket_remote_addr(int sock, struct sockaddr *remote_sockaddr, 
+                           socklen_t addrlen) {
+    struct socket_data *sd = NULL;
+    HASH_FIND_INT(socket_hash_table, &sock, sd);
+    if (!sd || !remote_sockaddr || addrlen < sizeof(struct sockaddr_in))
+        return -1;
+    *(struct sockaddr_in*)remote_sockaddr = sd->dest_addr;
     return 0;
 }
 
