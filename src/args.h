@@ -45,6 +45,12 @@ typedef struct {
   const char *log_file;
   const char *intf;
   const char *password;
+  /* Nat traverse. */
+  const char *proxy_server;
+  uint16_t proxy_port0;
+  uint16_t proxy_port1;
+  uint16_t relay_port;
+  /* end */
   const char *server;
   uint16_t port;
   uint16_t mtu;

@@ -18,7 +18,6 @@ enum NAT_TYPE {
 };
 
 const char *nat_type2str(int type);
-int request_nat_type(char *remote_ip, int port0, int port1);
-//int response_nat_type(int sock, struct sockaddr_in *client_sockaddr, int cmd);
+int request_nat_type(const char *remote_ip, int port0, int port1);
 
 #endif /* _NAT_HELPER_ */

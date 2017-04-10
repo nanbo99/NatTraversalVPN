@@ -9,10 +9,14 @@
 /* struct sockaddr */
 #include <netinet/in.h>
 
+#if 0
+
 #define PROXY_SERVER_IP	"45.62.113.42"
 #define LISTEN_PORT0    1024				/* common command. */
 #define LISTEN_PORT1    1025				/* common command. */
 #define LISTEN_PORT2    1026				/* TURN Relay Server. */
+
+#endif
 
 #define MAX_IP_SIZE    16
 
@@ -35,10 +39,12 @@ enum ROLE {
 
 enum TRAVERSAL_COMM {
 	/* Traversal command. */
+	TRAVERSAL_NONE,
 	TRAVERSAL_GETNATTYPE,
 	TRAVERSAL_GETSERVER,
-	TRAVERSAL_REGISTER,			/* Register punch hole server. */
-	TRAVERSAL_REGISTER_TURN,	/* Register turn server. */
+	TRAVERSAL_REGISTER_NONE,        /* Register a server use public ip address. */
+	TRAVERSAL_REGISTER_PUNCHHOLE,   /* Register punch hole server. */
+	TRAVERSAL_REGISTER_TURN,	    /* Register turn server. */
 	TRAVERSAL_PUNCHHOLE,
 	TRAVERSAL_TURN,
 	/* punch hole synchronous command. */
@@ -56,7 +62,9 @@ int nat_traversal(enum ROLE role, int sock,
                   struct sockaddr_in *remote_sockaddr, int retrytimes);
 int register_socket(enum ROLE role, int sockfd, int listen_port);
 
-int nat_traversal_init(enum ROLE role, int ctrlfd);
+int nat_traversal_init(enum ROLE role, int nattype, const char *nat_proxy_server, 
+                       uint16_t proxy_port0, uint16_t proxy_port1, uint16_t relay_port, 
+                       int ctrlfd);
 
 int nat_traversal_deinit();
 

@@ -62,7 +62,7 @@ const char *nat_type2str(int type) {
  *              NAT_Port_Restricted_Cone;
  *
  */
-int request_nat_type_diff_port(int sock, char *remote_ip, uint32_t remote_port) {
+static int request_nat_type_diff_port(int sock, const char *remote_ip, uint32_t remote_port) {
     int ret, local_port;
     socklen_t addrlen = sizeof(struct sockaddr_in);
     struct sockaddr_in local_sockaddr, remote_sockaddr, sender_sockaddr;
@@ -129,8 +129,8 @@ err_out:
     return ret;
 }
 
-int request_nat_type_multi_port(int sock, char *remote_ip, uint32_t remote_port0, 
-								uint32_t remote_port1) {
+static int request_nat_type_multi_port(int sock, const char *remote_ip, uint32_t remote_port0, 
+								       uint32_t remote_port1) {
     int ret, outer_port0, outer_port1;
     socklen_t addrlen = sizeof(struct sockaddr_in);
     struct sockaddr_in local_sockaddr, remote_sockaddr, sender_sockaddr;
@@ -184,7 +184,7 @@ int request_nat_type_multi_port(int sock, char *remote_ip, uint32_t remote_port0
     return ret;
 }
 
-int request_nat_type(char *remote_ip, int port0, int port1) {
+int request_nat_type(const char *remote_ip, int port0, int port1) {
     struct sockaddr_in local_sockaddr, remote_sockaddr, sender_sockaddr;
     uint32_t outer_port0, outer_port1;
     socklen_t addrlen = sizeof(struct sockaddr);

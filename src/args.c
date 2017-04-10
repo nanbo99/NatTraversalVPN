@@ -99,8 +99,20 @@ static int parse_config_file(shadowvpn_args_t *args, const char *filename) {
     errf("mode not set in config file");
     return -1;
   }
-  if (!args->server) {
-    errf("server not set in config file");
+  if (!args->proxy_server) {
+    errf("proxy server not set in config file");
+    return -1;
+  }
+  if (!args->proxy_port0) {
+    errf("proxy port0 not set in config file");
+    return -1;
+  }
+  if (!args->proxy_port1) {
+    errf("proxy port1 not set in config file");
+    return -1;
+  }
+  if (!args->relay_port) {
+    errf("relay port not set in config file");
     return -1;
   }
   if (!args->port) {
@@ -178,7 +190,15 @@ static int process_key_value(shadowvpn_args_t *args, const char *key,
       return -1;
     }
   }
-  if (strcmp("server", key) == 0) {
+  if (strcmp("proxyserver", key) == 0) {
+    args->proxy_server = strdup(value);
+  } else if (strcmp("proxyport0", key) == 0) {
+    args->proxy_port0 = atol(value);
+  } else if (strcmp("proxyport1", key) == 0) {
+    args->proxy_port1 = atol(value);
+  } else if (strcmp("relayport", key) == 0) {
+    args->relay_port = atol(value);
+  } else if (strcmp("server", key) == 0) {
     args->server = strdup(value);
   } else if (strcmp("port", key) == 0) {
     args->port = atol(value);
@@ -269,6 +289,7 @@ static void load_default_args(shadowvpn_args_t *args) {
   args->pid_file = "/var/run/shadowvpn.pid";
   args->log_file = "/var/log/shadowvpn.log";
   args->concurrency = 1;
+  args->server = "0.0.0.0";
 #ifdef TARGET_WIN32
   args->tun_mask = 24;
   args->tun_port = TUN_DELEGATE_PORT;

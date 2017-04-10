@@ -59,6 +59,7 @@
  * Nat Traversal
  */
 #include <nat_traversal.h>
+#include <nat_type.h>
 
 
 /*
@@ -331,6 +332,24 @@ static int non_block(int sock) {
   }
   err("fcntl");
 #else
+  u_long mode = 1;
+  if (NO_ERROR == ioctlsocket(sock, FIONBIO, &mode))
+    return disable_reset_report(sock);
+  err("ioctlsocket");
+#endif
+
+  return -1;
+}
+
+static int en_block(int sock) {
+  int flags;
+#ifndef TARGET_WIN32
+  flags = fcntl(sock, F_GETFL, 0);
+  if (flags != -1 && -1 != fcntl(sock, F_SETFL, flags & ~O_NONBLOCK)) {
+      return sock;
+  }
+  err("fcntl");
+#else
   u_long mode = 0;
   if (NO_ERROR == ioctlsocket(sock, FIONBIO, &mode))
     return disable_reset_report(sock);
@@ -347,7 +366,7 @@ static int max(int a, int b) {
 #endif
 
 int vpn_ctx_init(vpn_ctx_t *ctx, shadowvpn_args_t *args) {
-  int i, ctrl_fd;
+  int i, ctrl_fd, nat_type = NAT_None, ret;
 #ifdef TARGET_WIN32
   WORD wVersionRequested;
   WSADATA wsaData;
@@ -402,7 +421,16 @@ int vpn_ctx_init(vpn_ctx_t *ctx, shadowvpn_args_t *args) {
    * Do Nat traversal initialize work.
    */
   logf("%s: nat traversal init", __FUNCTION__);
-  nat_traversal_init(args->mode == SHADOWVPN_MODE_SERVER ? ROLE_Server : ROLE_Client, ctrl_fd);
+  if (args->mode == SHADOWVPN_MODE_SERVER) {
+    nat_type = request_nat_type(args->proxy_server, args->proxy_port0, args->proxy_port1);
+    ret = nat_traversal_init(ROLE_Server, nat_type, args->proxy_server, args->proxy_port0, 
+                       args->proxy_port1, args->relay_port, ctrl_fd);
+  } else {
+    ret = nat_traversal_init(ROLE_Client, nat_type, args->proxy_server, args->proxy_port0, 
+                       args->proxy_port1, args->relay_port, ctrl_fd);
+  }
+  
+  if(ret < 0) errf("failed to init nat traversal");
   
   ctx->nsock = 1;
   ctx->socks = calloc(ctx->nsock, sizeof(int));
@@ -419,12 +447,30 @@ int vpn_ctx_init(vpn_ctx_t *ctx, shadowvpn_args_t *args) {
     /*
      *  Nat traversal: punch hole and set remote_addr for client's udp socket.
      */
-    register_socket(args->mode == SHADOWVPN_MODE_SERVER ? ROLE_Server : ROLE_Client, sock, args->port);
-    if(args->mode != SHADOWVPN_MODE_SERVER)
+    register_socket(args->mode == SHADOWVPN_MODE_SERVER ? ROLE_Server : ROLE_Client, 
+                    sock, args->port);
+    if(args->mode == SHADOWVPN_MODE_CLIENT)
       get_socket_remote_addr(sock, ctx->remote_addrp, ctx->remote_addrlen);
   }
   ctx->args = args;
   return 0;
+}
+
+/* must be called under non-block mode. */
+static int drop_data(int sock, void *buf, size_t len) {
+  int ret;
+  struct sockaddr_storage temp_remote_addr;
+  socklen_t temp_remote_addrlen = sizeof(temp_remote_addr);
+  do {
+    ret = recvfrom(sock, buf, len, 0, (struct sockaddr *)&temp_remote_addr,
+                   &temp_remote_addrlen);
+  } while (ret >= 0);
+  
+  if (ret == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+      return 0;
+  }
+  err("recvfrom");
+  return -1;
 }
 
 int vpn_run(vpn_ctx_t *ctx) {
@@ -461,6 +507,7 @@ int vpn_run(vpn_ctx_t *ctx) {
 
   /*
    * Nat traverse: Get udp socket usable.
+   * For server doesn't need NAT traverse, Will not get socket from here.
    */
   get_socket(ctx->socks, ctx->nsock * sizeof(int));
   for (i = 0; i < ctx->nsock && ctx->socks[i] > 0; i++) {
@@ -496,31 +543,59 @@ int vpn_run(vpn_ctx_t *ctx) {
     }
 #ifndef TARGET_WIN32
     if (FD_ISSET(ctx->control_pipe[0], &readset)) {
-      int pipe_buf;
-      (void)read(ctx->control_pipe[0], &pipe_buf, sizeof(int));
-      if(!pipe_buf) break;
-      printf("add udp socket(%d) to fdset.\n", pipe_buf);
-      non_block(pipe_buf);
-      /* Nat traverse: add udp socket to select's readset. */
-      for(i = 0; i < ctx->nsock; i++) {
-        if(!ctx->socks[i]) {
-          ctx->socks[i] = pipe_buf;
+      int buf, socket;
+      (void)read(ctx->control_pipe[0], &buf, sizeof(int));
+      /* assume upd socket fd always larger than 0. */
+      if(buf <= 0) break;
+      socket = buf;
+      (void)read(ctx->control_pipe[0], &buf, sizeof(int));
+      printf("From fdset, %s udp socket(%d).\n", buf > 0 ? "add" : "del", socket);
+      /* Nat traverse: add/del udp socket to/from select's readset. */
+      for (i = 0; i < ctx->nsock; i++) {
+        if (buf > 0 && !ctx->socks[i]) {
+          ctx->socks[i] = socket;
           break;
         }
+        if (buf <= 0 && ctx->socks[i] == socket) {
+          ctx->socks[i] = 0;
+          break;
+        }
+      }
+      // drop udp data.
+      drop_data(socket, ctx->udp_buf + SHADOWVPN_PACKET_OFFSET, 
+                SHADOWVPN_OVERHEAD_LEN + usertoken_len + r);
+      if (buf > 0) {
+        non_block(socket);
+      } else {
+        en_block(socket);
       }
     }
 #else
     if (FD_ISSET(ctx->control_fd, &readset)) {
-      int buf;
+      int buf, socket;
       recv(ctx->control_fd, &buf, sizeof(int), 0);
-      if(!buf) break;
-      non_block(buf);
-      /* Nat traverse: add udp socket to select's readset. */
-      for(i = 0; i < ctx->nsock; i++) {
-        if(!ctx->socks[i]) {
-          ctx->socks[i] = buf;
+      if(buf <= 0) break;
+      socket = buf;
+      recv(ctx->control_fd, &buf, sizeof(int), 0);
+      printf("From fdset, %s udp socket(%d).\n", buf > 0 ? "add" : "del", socket);
+      /* Nat traverse: add/del udp socket to/from select's readset. */
+      for (i = 0; i < ctx->nsock; i++) {
+        if (buf > 0 && !ctx->socks[i]) {
+          ctx->socks[i] = socket;
           break;
         }
+        if (buf <= 0 && ctx->socks[i] == socket) {
+          ctx->socks[i] = 0;
+          break;
+        }
+      }
+      // drop udp data.
+      drop_data(socket, ctx->udp_buf + SHADOWVPN_PACKET_OFFSET, 
+                SHADOWVPN_OVERHEAD_LEN + usertoken_len + r);
+      if (buf > 0) {
+        non_block(socket);
+      } else {
+        en_block(socket);
       }
     }
 #endif
