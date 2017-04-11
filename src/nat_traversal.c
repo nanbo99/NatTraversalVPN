@@ -340,12 +340,6 @@ static void *nat_traversal_server_thread(void *param) {
         if(msg.role == ROLE_Proxy && msg.cmd == TRAVERSAL_PUNCHHOLE) {
             int buf = 0;
             log_out("Recv punch hole request!\n");
-            // if this udp socket already punch hole with another client socket,
-            // then reset it(move it out from fdset, set it to block mode).
-            if (-1 == write(ctrl_fd, &sd->socket, sizeof(int)) || 
-                -1 == write(ctrl_fd, &buf, sizeof(int))) {
-                printf("%s: write: %s\n", __FUNCTION__, strerror(errno));
-            }
             
             sd = socket_hash_table;
             //TODO: using the socket which port match with msg.port to do nat traversal
@@ -353,12 +347,20 @@ static void *nat_traversal_server_thread(void *param) {
             //        ...
             // }
             
+            assert(sd != NULL);
+            
+            // if this udp socket already punch hole with another client socket,
+            // then reset it(move it out from fdset, set it to block mode).
+            if (-1 == write(ctrl_fd, &sd->socket, sizeof(int)) || 
+                -1 == write(ctrl_fd, &buf, sizeof(int))) {
+                printf("%s: write: %s\n", __FUNCTION__, strerror(errno));
+            }
+            
             memset(&client_sockaddr, 0, sizeof(client_sockaddr));
             client_sockaddr.sin_family = AF_INET;
             client_sockaddr.sin_port = htons(msg.port);
             inet_aton(msg.ip, &client_sockaddr.sin_addr);
             
-            assert(sd != NULL);
             log_out("Punching hole...");
             
             if (nat_traversal(ROLE_Server, sd->socket, &client_sockaddr, 10) < 0) {
